@@ -16,8 +16,8 @@ save it to:
 
 (2) `s=sip, d=dip, reverse=0`
 
-  - if we search the first a packet, expression is `s=sip, d=dip, reverse=0`, will find the fist packet
+  - if we search the first packet, expression is `s=sip, d=dip, reverse=0`, will find the fist packet
   
-  - if web search the whole flow, expresssion is (`s=sip, d=sip, reverse=0`) || (`s=sip, d=sip, reverse=1`), equal as: `s=sip, d=dip`, so we cant find the whole flow, instead use (`sip=sip, d=dip`) or (`s=dip, d=sip`)
+  - if we search the whole flow, expresssion may be (`s=sip, d=sip, reverse=0`) || (`s=sip, d=sip, reverse=1`), equal as: `s=sip, d=dip`, so we can find the whole flow, instead use (`sip=sip, d=dip`) or (`s=dip, d=sip`) in common bpf expression
  
   - `reverse` is very important, the program should keep it correct, otherwise, the search condition is inversed 
