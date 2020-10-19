@@ -6,13 +6,16 @@
 #include <linux/if_ether.h>
 #include <linux/if_packet.h>
 #include <linux/ip.h>
+#include <arpa/inet.h>
 #include <sys/socket.h>
-#include <netinet/in.h>
-#include <netinet/tcp.h>
+#include <linux/tcp.h>
+#include <linux/udp.h>
 #include <string.h>
 #include <errno.h>
+#include <sys/types.h>
+
+#include <sys/mman.h> // mmap
 #include <roaring/roaring.h>
- #include <sys/mman.h> // mmap
 /*
 headers
 */
@@ -67,20 +70,31 @@ typedef struct _CommonIndexData {
     DynamicChunk *data;
 } CommonIndex;
 
-typedef struct _PktIdOffsetMapper {
-    uint64_t offset; // pcap偏移
-} PktIdOffsetMapper;
 
-/* copy from pcap-int.h */
-struct pcap_timeval {
-    uint32_t tv_sec;		/* seconds */
-    uint32_t tv_usec;		/* microseconds */
-};
-struct pcap_sf_pkthdr {
-    struct pcap_timeval ts;	/* time stamp */
-    uint32_t caplen;		/* length of portion present */
-    uint32_t len;		/* length this packet (off wire) */
-};
+/*
+Mapper format:
+PktIdOffsetMapperHeader
+PktIdOffsetMapperNode
+PktIdOffsetMapperNode
+PktIdOffsetMapperNode
+...
+
+*/
+
+#define MAPPER_MAGIC 0x6e616974676e6570U // "pengtian"
+#define MAPPER_NAME_SIZE 256 
+typedef struct _PktIdOffsetMapperHeader {
+    uint64_t magic;
+    uint64_t cnt; // total pkt size
+    uint64_t start_timestamp; // first纳秒时间戳
+    uint64_t end_timestamp; // last纳秒时间戳
+    unsigned char name[MAPPER_NAME_SIZE];
+} PktIdOffsetMapperHeader;
+
+typedef struct _PktIdOffsetMapperNode {
+    uint64_t offset; // pcap偏移
+    uint64_t timestamp; // 纳秒时间戳
+} PktIdOffsetMapperNode;
 
 #define container_of(ptr, type, member) ({              \
 const typeof( ((type *)0)->member ) *__mptr = (ptr);    \
@@ -103,10 +117,20 @@ typedef struct _BitmapChunk {
 1024 + 768~1023    => dip3 bitmap
 2048 + 0~65535      => sport bitmap
 2048 + 65536 + 0~65535 => dport bitmap
-2048+65536*2 + 0~255 => protocol bitmap
+2048+65536*2 + 0~255 => ip protocol bitmap
 */
-/* this struct should be aligned */
+/* this struct should be aligned, all index is little endian */
 typedef struct _FullIndex {
+    /* 00:11:22:33:44:55 */
+    BitmapChunk mac0[256];
+    BitmapChunk mac1[256];
+    BitmapChunk mac2[256];
+    BitmapChunk mac3[256];
+    BitmapChunk mac4[256];
+    BitmapChunk mac5[256];
+    /* 0x0800 */
+    BitmapChunk ether_type[65536];
+    /* 192.168.0.1 */
     BitmapChunk sip0[256];
     BitmapChunk sip1[256];
     BitmapChunk sip2[256];
@@ -115,9 +139,10 @@ typedef struct _FullIndex {
     BitmapChunk dip1[256];
     BitmapChunk dip2[256];
     BitmapChunk dip3[256];
+    /* IPPROTO_XXX */
+    BitmapChunk ip_proto[256];
     BitmapChunk sport[65536];
     BitmapChunk dport[65536];
-    BitmapChunk protocol[256];
 } FullIndex;
 
 /*
@@ -126,16 +151,20 @@ sources
 
 int IntValueFunc(void *data, int bs, uint64_t *ret, void *u){
     // data: iphdr
+    uint16_t v16; 
+    int64_t v64;
     switch (bs)
     {
     case IndexTypeB1:
         *ret = *((uint8_t *)data);
         break;
     case IndexTypeB2:
-        *ret = ntohs(*((uint16_t *)data));
+	v16 = ntohs(*((uint16_t *)data));
+        *ret = v16;
         break;
     case IndexTypeB4:
-        *ret = ntohl(*((uint32_t *)data));
+        v64 = (uint64_t)ntohl(*((uint32_t *)data));
+        *ret = v64;
         break;
     default:
         return 1;
@@ -145,6 +174,9 @@ int IntValueFunc(void *data, int bs, uint64_t *ret, void *u){
 }
 int compress_bitmap = 1;
 int g_mapper_fd;
+PktIdOffsetMapperHeader g_mapper_header = {
+    .magic = MAPPER_MAGIC
+};
 FullIndex full_index = {0};
 FullIndex full_index_loaded = {0};
 
@@ -156,41 +188,51 @@ CommonIndex sip0_index = {
         .get = &IntValueFunc
     }
 };
-void packet_process(uint64_t pkt_id, uint64_t offset, uint64_t sz, const unsigned char *data) {
-    printf("TODO: handle packet, pkt_id: %lu offset: %lu pcap_hdr_sz: %lu timeval: %lu data sz: %lu\n", pkt_id, offset, sizeof(struct pcap_sf_pkthdr), sizeof(struct timeval), sz);
+void packet_process(uint64_t pkt_id, uint64_t offset, uint64_t sz, const unsigned char *data, uint64_t nano_sec) {
+    printf("TODO: handle packet, pkt_id: %lu offset: %lu fake pcap_hdr_sz: %lu real pcap_hdr_sz:%lu timeval: %lu data sz: %lu\n"
+        , pkt_id, offset, sizeof(struct pcap_pkthdr), sizeof(struct timeval), sz
+    );
     /* assume data is ether*/
     const struct ethhdr *eth;
     const struct iphdr *ip;
     const struct tcphdr *tcp;
+    const struct udphdr *udp;
+
+    uint8_t ip_proto = 0;
+    uint16_t ether_type = 0;
+    uint64_t sip = 0;
+    uint64_t dip = 0;
+    uint8_t sip_val[4];
+    uint8_t dip_val[4];
+    uint16_t sport, dport;
+
     eth = (struct ethhdr *)data;
-    if (eth->h_proto != ntohs(ETH_P_IP)) {
+
+    ether_type = ntohs(eth->h_proto);
+    if (ether_type != ETH_P_IP) {
+	printf("Skip non IP packet\n");
         goto lbl_end;
     }
     ip = (struct iphdr *)(eth + 1);
 
     /* 写包和offset的 对应文件 */
-    PktIdOffsetMapper m = {
+    PktIdOffsetMapperNode m = {
         .offset = offset,
+        .timestamp = nano_sec
     };
-    int r = write(g_mapper_fd, &m, sizeof(PktIdOffsetMapper));
-    if (r != sizeof(PktIdOffsetMapper)) {
+    int r = write(g_mapper_fd, &m, sizeof(PktIdOffsetMapperNode));
+    if (r != sizeof(PktIdOffsetMapperNode)) {
         printf("Write fail, fd: %d, error: %s\n", g_mapper_fd, strerror(errno));
-    }
-    if (ip->protocol != IPPROTO_TCP) {
         goto lbl_end;
     }
-    tcp = (struct tcphdr*)(ip+1);
 
-    int protocol = IPPROTO_TCP;
     /* handling sip0 index */
-    uint64_t sip;
-    uint64_t dip;
-    uint8_t sip_val[4];
-    uint8_t dip_val[4];
+    
     // if (0 != sip0_index.func.get((void *)container_of(ip, struct iphdr, saddr), 4, &sip, NULL)) {
     //     printf("get sip0 index fail\n");
     //     goto lbl_end;
     // }
+    
     sip = ntohl(ip->saddr);
     dip = ntohl(ip->daddr);
     sip_val[3] = sip & 0xffLU; // 1
@@ -201,17 +243,52 @@ void packet_process(uint64_t pkt_id, uint64_t offset, uint64_t sz, const unsigne
     dip_val[2] = dip >> 8  & 0xff00U;
     dip_val[1] = dip >> 16 & 0xffU;
     dip_val[0] = dip >> 24 & 0xffU;
-    printf("get sip index OK sip: %lu, sip 0-3: %lu.%lu.%lu.%lu\n", sip, sip_val[0], sip_val[1], sip_val[2], sip_val[3]);
-
+    ip_proto = ip->protocol;
+    switch (ip_proto)
+    {
+    case IPPROTO_TCP:
+        /* code */
+        tcp = (struct tcphdr*)(ip + 1);
+        sport = ntohs(tcp->source);
+        dport = ntohs(tcp->dest);
+        break;
+    case IPPROTO_UDP:
+        udp = (struct udphdr*)(ip + 1);
+        sport = ntohs(udp->source);
+        dport = ntohs(udp->dest);
+    default:
+        sport = dport = 0;
+        break;
+    }
+    printf("PKT: ether_type:0x%02x ip_proto:0x%02x sip: 0x%02x, dip:0x%02x "
+        , ether_type, ip_proto, sip, dip
+    );
+    printf("%u.%u.%u.%u:%d->%u.%u.%u.%u:%d"
+	, sip_val[0], sip_val[1], sip_val[2], sip_val[3], sport
+	,  dip_val[0], dip_val[1], dip_val[2], dip_val[3], dport
+    );
+    printf("\n");
     // 更新index信息, 遍历完成后会序列化
-    roaring_bitmap_add(full_index.sip0[sip_val[0]].r, pkt_id);
-    roaring_bitmap_add(full_index.sip1[sip_val[1]].r, pkt_id);
-    roaring_bitmap_add(full_index.sip2[sip_val[2]].r, pkt_id);
-    roaring_bitmap_add(full_index.sip3[sip_val[3]].r, pkt_id);
-    roaring_bitmap_add(full_index.dip0[sip_val[0]].r, pkt_id);
-    roaring_bitmap_add(full_index.dip1[sip_val[1]].r, pkt_id);
-    roaring_bitmap_add(full_index.dip2[sip_val[2]].r, pkt_id);
-    roaring_bitmap_add(full_index.dip3[sip_val[3]].r, pkt_id);
+    roaring_bitmap_add(full_index.ether_type[ether_type].r, pkt_id);
+    roaring_bitmap_add(full_index.ip_proto[ip_proto].r, pkt_id);
+    roaring_bitmap_add(full_index.sip0[sip_val[0]].r,   pkt_id);
+    roaring_bitmap_add(full_index.sip1[sip_val[1]].r,   pkt_id);
+    roaring_bitmap_add(full_index.sip2[sip_val[2]].r,   pkt_id);
+    roaring_bitmap_add(full_index.sip3[sip_val[3]].r,   pkt_id);
+    roaring_bitmap_add(full_index.dip0[dip_val[0]].r,   pkt_id);
+    roaring_bitmap_add(full_index.dip1[dip_val[1]].r,   pkt_id);
+    roaring_bitmap_add(full_index.dip2[dip_val[2]].r,   pkt_id);
+    roaring_bitmap_add(full_index.dip3[dip_val[3]].r,   pkt_id);
+    roaring_bitmap_add(full_index.sport[sport].r,       pkt_id);
+    roaring_bitmap_add(full_index.dport[dport].r,       pkt_id);
+
+    if (nano_sec < g_mapper_header.start_timestamp || g_mapper_header.start_timestamp == 0) {
+        g_mapper_header.start_timestamp = nano_sec;
+    }
+    if (nano_sec > g_mapper_header.end_timestamp || g_mapper_header.end_timestamp == 0) {
+        g_mapper_header.end_timestamp = nano_sec;
+    }
+    g_mapper_header.cnt++;
 
 lbl_end:
     return;
@@ -221,41 +298,81 @@ void show_usage(){
     printf("Usage: $PROG your_pcap_file_path\n");
 }
 
+
+void dump_mapper_info(PktIdOffsetMapperHeader *h, char *prefix) {
+    printf("%s mapper info(%d bytes), magic:0x%02x cnt:%lu, start_ts:%lu end_ts:%lu name:%s\n"
+        , prefix ? prefix : ""
+        , sizeof(PktIdOffsetMapperHeader)
+        , h->magic
+        , h->cnt
+        , h->start_timestamp
+        , h->end_timestamp
+        , h->name
+    );
+}
+
 #define INDEX_PKT_ID_MAMPPER "pkg_id_map.idx"
 #define INDEX_BPF "pkg_bpf.idx"
 
 void dump_files() {
-    PktIdOffsetMapper m = {0};
+    PktIdOffsetMapperNode m = {0};
+    PktIdOffsetMapperHeader h = {0};
     ssize_t sz;
-    int fd = open(INDEX_PKT_ID_MAMPPER, O_RDONLY);
+    int fd;
     uint64_t i = 0;
     int offset = 0;
+    if ((fd = open(INDEX_PKT_ID_MAMPPER, O_RDONLY)) < 0) {
+        printf("Cant read %s fail\n", INDEX_PKT_ID_MAMPPER);
+        return ;
+    }
+    /* read header info */
+    sz = read(fd, &h, sizeof(PktIdOffsetMapperHeader));
+    if (sz <= 0) {
+        printf("Read mapper fail\n");
+        goto lbl_clean;
+    }
+    dump_mapper_info(&h, "Read");
+    if (h.magic != MAPPER_MAGIC) {
+        printf("Incorrect mapper magic version, skip\n");
+        goto lbl_clean;
+    }
     while (1) {
-        sz = read(fd, &m, sizeof(PktIdOffsetMapper));
+        sz = read(fd, &m, sizeof(PktIdOffsetMapperNode));
         if (sz <= 0) {
             printf("Read INDEX_PKT_ID_MAMPPER over\n");
             break;
         }
-        printf("pkt_id: %lu, pcap offset: %lu\n", i, m.offset);
+        // printf("pkt_id: %lu, pcap offset: %lu\n", i, m.offset);
         i++;
         offset += sz;
     }
+lbl_clean:
+    close(fd);
     printf("Dump over\n");
 }
-void open_files() {
 
+
+void open_files() {
     dump_files();
+    printf("Opening files\n");
     g_mapper_fd = open(INDEX_PKT_ID_MAMPPER, O_CREAT|O_TRUNC|O_WRONLY, 0644);
     if (g_mapper_fd < 0) {
         printf("open INDEX_PKT_ID_MAMPPER fail\n");
         goto lbl_err;
     }
-    
+    printf("Seeking header\n");
+    lseek(g_mapper_fd, sizeof(PktIdOffsetMapperHeader), SEEK_SET);
+    g_mapper_header.magic = MAPPER_MAGIC;
+    snprintf(g_mapper_header.name, MAPPER_NAME_SIZE - 1, INDEX_PKT_ID_MAMPPER);
     return ;
 lbl_err:
     exit(4);
 }
+
 void close_files() {
+    dump_mapper_info(&g_mapper_header, "Writing");
+    lseek(g_mapper_fd, 0, SEEK_SET);
+    write(g_mapper_fd, &g_mapper_header, sizeof(PktIdOffsetMapperHeader));
     close(g_mapper_fd);
 }
 
@@ -397,7 +514,7 @@ void FullIndexDump(FullIndex *idx, unsigned char *out_buf, uint64_t *out_buf_len
         offset += sizeof(bc->ck.len);
         bc->ck.data = buf;
         used_sz = roaring_bitmap_portable_serialize(bc->r, buf);
-        printf("%d Will write bitmap to buf, %lu+%lu @%lu\n", i, sizeof( typeof(((Chunk *)0)->len )), used_sz, offset);
+        // printf("%d Will write bitmap to buf, %lu+%lu @%lu\n", i, sizeof( typeof(((Chunk *)0)->len )), used_sz, offset);
         if (used_sz != bc->ck.len) {
             printf("May errro!!! %lu!=%lu\n", used_sz, bc->ck.len);
         }
@@ -436,7 +553,7 @@ int FullIndexLoad(FullIndex *idx, char *fp) {
             i++;
             continue;
         }
-        printf("Deserialize bitmap, data len: %lu@%lu\n", ck.len, buf - (unsigned char*)mobj.addr);
+        // printf("Deserialize bitmap, data len: %lu@%lu\n", ck.len, buf - (unsigned char*)mobj.addr);
         roaring_bitmap_t *r = roaring_bitmap_portable_deserialize_safe(ck.data, ck.len);
         if (bc->r)
             roaring_bitmap_or_inplace(bc->r, r); // 并集
@@ -499,7 +616,7 @@ int main(int argc, char **argv) {
     char *pcap_file = NULL;
     pcap_t *handle;
     int fd;
-    struct pcap_pkthdr header;
+    struct pcap_pkthdr header; // same as pcap_pkthdr
     uint64_t pkt_id = 0;
     /* https://wiki.wireshark.org/Development/LibpcapFileFormat */
     uint64_t offset = sizeof(struct pcap_file_header);
@@ -509,7 +626,7 @@ int main(int argc, char **argv) {
         exit(1);
     }
     pcap_file = argv[1];
-    handle = pcap_open_offline(pcap_file, errbuf);
+    handle = pcap_open_offline_with_tstamp_precision(pcap_file, PCAP_TSTAMP_PRECISION_NANO, errbuf);
     if (!handle) {
         printf("Cant open pcap file: %s, error: %s\n", pcap_file, errbuf);
         exit(2);
@@ -518,17 +635,19 @@ int main(int argc, char **argv) {
     FullIndexCreate(&full_index);
     FullIndexCreate(&full_index_loaded);
     FullIndexLoad(&full_index_loaded, INDEX_BPF);
-
     while (1) {
         int cur_pos;
+        uint64_t nano_sec;
+
         packet = pcap_next(handle, &header);
         if (!packet) {
             printf("Over\n");
             break;
         }
-        packet_process(pkt_id, offset, header.caplen, packet);
+        nano_sec = header.ts.tv_sec * 1000000000 + header.ts.tv_usec;
+        packet_process(pkt_id, offset, header.caplen, packet, nano_sec);
         /* next packet offset */
-        offset += sizeof(struct pcap_sf_pkthdr) + header.caplen;
+        offset += sizeof(struct pcap_pkthdr) + header.caplen;
         pkt_id++;
     }
     printf("Current pcap diff cnt: %d\n", FullIndexCmp(&full_index, &full_index_loaded));
