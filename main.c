@@ -268,7 +268,7 @@ void packet_process(uint64_t pkt_id, uint64_t offset, uint64_t sz, const unsigne
 	,  dip_val[0], dip_val[1], dip_val[2], dip_val[3], dport
     );
     printf("\n");
-    // 更新index信息, 遍历完成后会序列化
+    // 更新index信息, 遍历完成后会序列化, TODO: 这里应该针对协议进行bit置位
     roaring_bitmap_add(full_index.ether_type[ether_type].r, pkt_id);
     roaring_bitmap_add(full_index.ip_proto[ip_proto].r, pkt_id);
     roaring_bitmap_add(full_index.sip0[sip_val[0]].r,   pkt_id);
