@@ -106,6 +106,8 @@ create a bitmap for each bit
     this struct should be aligned, all index is network bytes order
     self: record to log all enabled after index bit
     ...: record bitmap to packet id
+
+    TODO: create a default mask to skip unused bytes
  */
 typedef struct _FullIndex {
     
