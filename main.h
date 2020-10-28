@@ -22,9 +22,11 @@
 #include <string.h>
 #include <errno.h>
 #include <sys/types.h>
-#include <sys/mman.h> // mmap
+#include <sys/mman.h> /* mmap */
 #include <roaring/roaring.h>
 #include <stdint.h>
+#include <time.h> /* struct tm */
+
 
 #define MAX(x, y) (x) > (y) ? (x) : (y)
 #define MIN(x, y) (x) < (y) ? (x) : (y)
@@ -54,6 +56,7 @@ PktIdOffsetMapperNode
 #define MAPPER_NAME_SIZE 256 
 #define MAPPER_MIN_ID UINT64_C(0)
 #define MAPPER_MAX_ID UINT64_C(0xffffffff)
+#define MAPPER_INDEX_SZ 1
 // #define MAPPER_MAX_ID UINT64_C(0xffffffff)
  
 typedef struct _PktIdOffsetMapperHeader {
@@ -64,10 +67,20 @@ typedef struct _PktIdOffsetMapperHeader {
     unsigned char name[MAPPER_NAME_SIZE];
 } PktIdOffsetMapperHeader;
 
+/*
+max cnt: 2^32, max per packet size: <= 9000, let it be 2^16(65536)
+    max offset = 2^32 * 2^16 = 2^48 (we can save 64-48=16bit=2bytes)
+max timestamp: 
+    >>> time.ctime(2**64 / 1000000000)
+    'Mon Jul 22 07:34:33 2554'
+    >>> time.ctime(2**63 / 1000000000)
+    'Sat Apr 12 07:47:16 2262'
+
+*/
 typedef struct _PktIdOffsetMapperNode {
-    uint64_t offset; // pcap偏移
+    uint64_t offset: 48; // pcap偏移
     uint64_t timestamp; // 纳秒时间戳
-} PktIdOffsetMapperNode;
+} __attribute__((__packed__)) PktIdOffsetMapperNode;
 
 #define container_of(ptr, type, member) ({              \
 const typeof( ((type *)0)->member ) *__mptr = (ptr);    \
@@ -84,15 +97,19 @@ typedef struct _BitmapChunk {
 struct vlanhdr {
 	uint16_t proto;
 	uint16_t tci;
-};
+} __attribute__((__packed__)) ;
 
 /*
 create a bitmap for each bit
 */
-/* this struct should be aligned, all index is network bytes order */
+/* 
+    this struct should be aligned, all index is network bytes order
+    self: record to log all enabled after index bit
+    ...: record bitmap to packet id
+ */
 typedef struct _FullIndex {
-    /* record to log all index bit */
-    BitmapChunk self[1];
+    
+    BitmapChunk self[MAPPER_INDEX_SZ];
     /* ether */
     union {
         struct {
@@ -210,3 +227,117 @@ enum {
 };
 
 void update_index_common(FullIndex *idx, int idx_type, const uint8_t *hdr, const uint8_t *hdr_mask, uint32_t hdr_sz, int64_t pkt_id);
+
+
+void dump_hex(void *buf, int len);
+
+#if 0 && defined(IS_X64) && defined(ROARING_INLINE_ASM)
+#define RDTSC_START(cycles)                                                   \
+    do {                                                                      \
+        register unsigned cyc_high, cyc_low;                                  \
+        __asm volatile(                                                       \
+            "cpuid\n\t"                                                       \
+            "rdtsc\n\t"                                                       \
+            "mov %%edx, %0\n\t"                                               \
+            "mov %%eax, %1\n\t"                                               \
+            : "=r"(cyc_high), "=r"(cyc_low)::"%rax", "%rbx", "%rcx", "%rdx"); \
+        (cycles) = ((uint64_t)cyc_high << 32) | cyc_low;                      \
+    } while (0)
+
+#define RDTSC_FINAL(cycles)                                                   \
+    do {                                                                      \
+        register unsigned cyc_high, cyc_low;                                  \
+        __asm volatile(                                                       \
+            "rdtscp\n\t"                                                      \
+            "mov %%edx, %0\n\t"                                               \
+            "mov %%eax, %1\n\t"                                               \
+            "cpuid\n\t"                                                       \
+            : "=r"(cyc_high), "=r"(cyc_low)::"%rax", "%rbx", "%rcx", "%rdx"); \
+        (cycles) = ((uint64_t)cyc_high << 32) | cyc_low;                      \
+    } while (0)
+
+#elif defined(__linux__) && defined(__GLIBC__)
+
+#include <time.h>
+#ifdef CLOCK_THREAD_CPUTIME_ID
+#define RDTSC_START(cycles) \
+  do { \
+    struct timespec ts; \
+    clock_gettime(CLOCK_THREAD_CPUTIME_ID, &ts); \
+    cycles = ts.tv_sec * UINT64_C(1000000000) + ts.tv_nsec; \
+  } while (0)
+
+#define RDTSC_FINAL(cycles) \
+  do { \
+    struct timespec ts; \
+    clock_gettime(CLOCK_REALTIME, &ts); \
+    cycles = ts.tv_sec * UINT64_C(1000000000) + ts.tv_nsec; \
+  } while (0)
+
+#elif defined(CLOCK_REALTIME)  // #ifdef CLOCK_THREAD_CPUTIME_ID
+#define RDTSC_START(cycles) \
+  do { \
+    struct timespec ts; \
+    clock_gettime(CLOCK_REALTIME, &ts); \
+    cycles = ts.tv_sec * UINT64_C(1000000000) + ts.tv_nsec; \
+  } while (0)
+
+#define RDTSC_FINAL(cycles) \
+  do { \
+    struct timespec ts; \
+    clock_gettime(CLOCK_REALTIME, &ts); \
+    cycles = ts.tv_sec * UINT64_C(1000000000) + ts.tv_nsec; \
+  } while (0)
+
+#else
+#define RDTSC_START(cycles) \
+  do { \
+    cycles = clock(); \
+  } while(0)
+
+#define RDTSC_FINAL(cycles) \
+  do { \
+    cycles = clock(); \
+  } while(0)
+
+#endif // #ifdef CLOCK_THREAD_CPUTIME_ID
+
+#else
+
+/**
+* Other architectures do not support rdtsc ?
+*/
+#include <time.h>
+
+#define RDTSC_START(cycles) \
+    do {                    \
+        cycles = clock();   \
+    } while (0)
+
+#define RDTSC_FINAL(cycles) \
+    do {                    \
+        cycles = clock();   \
+    } while (0)
+
+#endif
+
+static inline uint64_t get_current_msec_slow() {
+        struct timeval tv;
+        gettimeofday(&tv,NULL);
+        return tv.tv_sec * 1000 + tv.tv_usec / 1000;
+}
+
+static char *datetime_str() {
+	static char buf[256] = {0};
+	static char buf_fmt[256] = {0};
+	struct tm  ts;
+    uint64_t msec = get_current_msec_slow();
+    int msec_mod = msec % 1000;
+    time_t rawtime = (uint64_t)(msec/1000);
+	/* Format time, "yyyy-mm-dd hh:mm:ss.xxx zzz" */
+	ts = *localtime(&rawtime);
+	sprintf(buf_fmt, "[%%Y-%%m-%%d %%H:%%M:%%S.%03d %%Z]", msec_mod);
+	strftime(buf, sizeof(buf)-1, buf_fmt, &ts);
+	return buf;
+}
+#define debug(fmt, arg...) printf("%s " fmt, datetime_str(), ##arg)
