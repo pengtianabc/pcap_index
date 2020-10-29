@@ -106,8 +106,6 @@ create a bitmap for each bit
     this struct should be aligned, all index is network bytes order
     self: record to log all enabled after index bit
     ...: record bitmap to packet id
-
-    TODO: create a default mask to skip unused bytes
  */
 typedef struct _FullIndex {
     
@@ -122,6 +120,9 @@ typedef struct _FullIndex {
         } __attribute__((__packed__));
         BitmapChunk ether_hdr[14*8];
     } __attribute__((__packed__));
+#define FULL_INDEX_ETHER_HDR_MASK_INT   0xffffffffffffffffffffffffffff
+#define FULL_INDEX_ETHER_HDR_MASK       "\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff"
+
     /* vlan, only support 1 layer vlan */
     union {
         struct {
@@ -132,6 +133,8 @@ typedef struct _FullIndex {
         } __attribute__((__packed__));;
         BitmapChunk vlan_hdr[4*8];
     };
+#define FULL_INDEX_VLAN_HDR_MASK_INT    0b000011111111111111111111111111111111111111111111
+#define FULL_INDEX_VLAN_HDR_MASK        "\x00\x00\x0f\xff\xff\xff\xff\xff"
     /* arp */
     union {
         struct {
@@ -147,6 +150,8 @@ typedef struct _FullIndex {
         } __attribute__((__packed__));;
         BitmapChunk arp_hdr[28*8];
     } __attribute__((__packed__));
+#define FULL_INDEX_ARP_HDR_MASK_INT 0x0
+#define FULL_INDEX_ARP_HDR_MASK     "\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00"
     /* ipv4 */
     union {
         struct {
@@ -164,6 +169,8 @@ typedef struct _FullIndex {
         } __attribute__((__packed__));;
         BitmapChunk ip_hdr[20*8];
     } __attribute__((__packed__));
+#define FULL_INDEX_IP_HDR_MASK_INT  0x000000000000000000ff0000ffffffffffffffff
+#define FULL_INDEX_IP_HDR_MASK      "\x00\x00\x00\x00\x00\x00\x00\x00\x00\xff\x00\x00\xff\xff\xff\xff\xff\xff\xff\xff"
     /* ipv6 */
     union {
         struct {
@@ -178,6 +185,8 @@ typedef struct _FullIndex {
         } __attribute__((__packed__));;
         BitmapChunk ip6_hdr[40*8];
     } __attribute__((__packed__));
+#define FULL_INDEX_IP6_HDR_MASK_INT  0x000000000000ff00ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff
+#define FULL_INDEX_IP6_HDR_MASK      "\x00\x00\x00\x00\x00\x00\xff\x00\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff"
     /* tcp */
     union {
         struct {
@@ -194,6 +203,8 @@ typedef struct _FullIndex {
         } __attribute__((__packed__));;
         BitmapChunk tcp_hdr[20*8];
     } __attribute__((__packed__));
+#define FULL_INDEX_TCP_HDR_MASK_INT     0xffffffff000000000000000000ff000000000000
+#define FULL_INDEX_TCP_HDR_MASK         "\xff\xff\xff\xff\x00\x00\x00\x00\x00\x00\x00\x00\x00\xff\x00\x00\x00\x00\x00\x00"
     /* udp */
     union {
         struct {
@@ -204,6 +215,8 @@ typedef struct _FullIndex {
         } __attribute__((__packed__));;
         BitmapChunk udp_hdr[8*8];
     } __attribute__((__packed__));
+#define FULL_INDEX_UDP_HDR_MASK_INT     0xffffffff00000000
+#define FULL_INDEX_UDP_HDR_MASK         "\xff\xff\xff\xff\x00\x00\x00\x00"
     /* icmp */
     union {
         struct {
@@ -211,21 +224,23 @@ typedef struct _FullIndex {
             BitmapChunk icmp_code[1*8];
             BitmapChunk icmp_cksum[2*8];
         } __attribute__((__packed__));;
-        BitmapChunk icmp_hdr[1*8];
+        BitmapChunk icmp_hdr[4*8];
     } __attribute__((__packed__));
+#define FULL_INDEX_ICMP_HDR_MASK_INT 0xffff0000
+#define FULL_INDEX_ICMP_HDR_MASK     "\xff\xff\x00\x00"
 
 } __attribute__((__packed__)) FullIndex ;
 enum {
-    INDEX_TYPE_SELF = 0,
-    INDEX_TYPE_ETHER,
-    INDEX_TYPE_VLAN ,
-    INDEX_TYPE_ARP ,
-    INDEX_TYPE_IPV4 ,
-    INDEX_TYPE_IPV6 ,
-    INDEX_TYPE_TCP ,
-    INDEX_TYPE_UDP ,
-    INDEX_TYPE_ICMP ,
-    INDEX_TYPE_MAX 
+    INDEX_TYPE_SELF     = 0,
+    INDEX_TYPE_ETHER    = 0x01,
+    INDEX_TYPE_VLAN     = 0x02,
+    INDEX_TYPE_ARP      = 0x04,
+    INDEX_TYPE_IPV4     = 0x08,
+    INDEX_TYPE_IPV6     = 0x10,
+    INDEX_TYPE_TCP      = 0x20,
+    INDEX_TYPE_UDP      = 0x40,
+    INDEX_TYPE_ICMP     = 0x80,
+    INDEX_TYPE_MASK     = 0xff
 };
 
 void update_index_common(FullIndex *idx, int idx_type, const uint8_t *hdr, const uint8_t *hdr_mask, uint32_t hdr_sz, int64_t pkt_id);

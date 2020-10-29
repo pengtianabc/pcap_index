@@ -124,48 +124,56 @@ void update_index_generic(FullIndex *idx, FullIndex *base_idx, int idx_type, con
     int sz = 0;
     int i = 0;
     int offset = 0;
+    const uint8_t *inner_hdr_mask;
     const int per_sz = sizeof(BitmapChunk);
     BitmapChunk *r = NULL;
     BitmapChunk *self = NULL;
     if (!hdr || !idx || !hdr_sz)
         return;
-    if (idx_type <= INDEX_TYPE_SELF || idx_type >= INDEX_TYPE_MAX) {
+    if (!(idx_type & INDEX_TYPE_MASK)) 
         return;
-    }
     self = idx->self;
     switch (idx_type)
     {
     case INDEX_TYPE_ETHER:
         r = idx->ether_hdr;
         sz = sizeof(idx->ether_hdr);
+        inner_hdr_mask = FULL_INDEX_ETHER_HDR_MASK;
         break;
     case INDEX_TYPE_VLAN:
         r = idx->vlan_hdr;
         sz = sizeof(idx->vlan_hdr);
+        inner_hdr_mask = FULL_INDEX_VLAN_HDR_MASK;
         break;
     case INDEX_TYPE_ARP:
         r = idx->arp_hdr;
         sz = sizeof(idx->arp_hdr);
+        inner_hdr_mask = FULL_INDEX_ARP_HDR_MASK;
         break;
     case INDEX_TYPE_IPV4:
         r = idx->ip_hdr;
         sz = sizeof(idx->ip_hdr);
+        inner_hdr_mask = FULL_INDEX_IP_HDR_MASK;
         break;
     case INDEX_TYPE_IPV6:
         r = idx->ip6_hdr;
         sz = sizeof(idx->ip6_hdr);
+        inner_hdr_mask = FULL_INDEX_IP6_HDR_MASK;
         break;
     case INDEX_TYPE_TCP:
         r = idx->tcp_hdr;
         sz = sizeof(idx->tcp_hdr);
+        inner_hdr_mask = FULL_INDEX_TCP_HDR_MASK;
         break;
     case INDEX_TYPE_UDP:
         r = idx->udp_hdr;
         sz = sizeof(idx->udp_hdr);
+        inner_hdr_mask = FULL_INDEX_UDP_HDR_MASK;
         break;
     case INDEX_TYPE_ICMP:
         r = idx->icmp_hdr;
         sz = sizeof(idx->icmp_hdr);
+        inner_hdr_mask = FULL_INDEX_ICMP_HDR_MASK;
         break;
     default:
         debug("Invalid index type: %d, skip\n", idx_type);
@@ -184,7 +192,7 @@ void update_index_generic(FullIndex *idx, FullIndex *base_idx, int idx_type, con
     while(i < hdr_sz) {
         /* check and set bit into bitmap start from r */
         uint32_t j = 0;
-        uint32_t m = hdr_mask ? (hdr_mask[i] & 0xffU) : 0xffU ;
+        uint32_t m = hdr_mask ? (hdr_mask[i] & inner_hdr_mask[i] & 0xffU) : inner_hdr_mask[i] & 0xffU ;
         uint32_t v = hdr[i] & m;
         /* if all bytes if not in mask, check next bytes */
         if (m) {
@@ -532,16 +540,16 @@ void packet_process(uint64_t pkt_id, uint64_t offset, uint64_t sz, const unsigne
     }
 lbl_end:
     ;
-    // update_index_common(&full_index, INDEX_TYPE_ETHER   , (const uint8_t *)eth   , NULL, sizeof(struct ethhdr)    , pkt_id);
-    // update_index_common(&full_index, INDEX_TYPE_VLAN    , (const uint8_t *)vlan  , NULL, sizeof(struct vlanhdr)   , pkt_id);
-    // update_index_common(&full_index, INDEX_TYPE_ARP     , (const uint8_t *)arp   , NULL, sizeof(struct arphdr)    , pkt_id);
+    update_index_common(&full_index, INDEX_TYPE_ETHER   , (const uint8_t *)eth   , NULL, sizeof(struct ethhdr)    , pkt_id);
+    update_index_common(&full_index, INDEX_TYPE_VLAN    , (const uint8_t *)vlan  , NULL, sizeof(struct vlanhdr)   , pkt_id);
+    update_index_common(&full_index, INDEX_TYPE_ARP     , (const uint8_t *)arp   , NULL, sizeof(struct arphdr)    , pkt_id);
     // debug("Real ip mem: ");
     // dump_hex(ip, sizeof(struct iphdr));
     update_index_common(&full_index, INDEX_TYPE_IPV4    , (const uint8_t *)ip    , NULL, sizeof(struct iphdr)     , pkt_id);
-    // update_index_common(&full_index, INDEX_TYPE_IPV6    , (const uint8_t *)ipv6  , NULL, sizeof(struct ip6_hdr)   , pkt_id);
-    // update_index_common(&full_index, INDEX_TYPE_TCP     , (const uint8_t *)tcp   , NULL, sizeof(struct tcphdr)    , pkt_id);
-    // update_index_common(&full_index, INDEX_TYPE_UDP     , (const uint8_t *)udp   , NULL, sizeof(struct udphdr)    , pkt_id);
-    // update_index_common(&full_index, INDEX_TYPE_ICMP    , (const uint8_t *)icmp  , NULL, sizeof(struct icmphdr)   , pkt_id);
+    update_index_common(&full_index, INDEX_TYPE_IPV6    , (const uint8_t *)ipv6  , NULL, sizeof(struct ip6_hdr)   , pkt_id);
+    update_index_common(&full_index, INDEX_TYPE_TCP     , (const uint8_t *)tcp   , NULL, sizeof(struct tcphdr)    , pkt_id);
+    update_index_common(&full_index, INDEX_TYPE_UDP     , (const uint8_t *)udp   , NULL, sizeof(struct udphdr)    , pkt_id);
+    update_index_common(&full_index, INDEX_TYPE_ICMP    , (const uint8_t *)icmp  , NULL, sizeof(struct icmphdr)   , pkt_id);
     // TIME_END();
 
     /* 写包和offset的 对应文件 */
